@@ -1,21 +1,3 @@
-/**
- * 小红书 x-s / x-t 签名器（纯 Node，零浏览器）
- *
- * 依赖：
- *   - jsdom        提供真实 DOM（VM 会做 appendChild/removeChild，假对象过不了类型校验）
- *   - _eval_captured.js  signV2Init 实际 eval 的载荷（288KB，含字节码 VM）
- *
- * 算法（来自 vendor-dynamic.js 的 seccore_signv2，已逐字段核对）：
- *   c = url + (data 为 object ? JSON.stringify(data) : data 为 string ? data : "")
- *   u = md5(c); p = md5(url)
- *   x3 = window.mnsv2(c, u, p)
- *   S = {x0:"4.4.3", x1:"xhs-pc-web", x2:"Windows", x3, x4: data?typeof data:"", x5:u}
- *   X-s = "XYS_" + base64_custom( utf8(JSON.stringify(S)) )
- *
- * 用法：
- *   node xhs_sign.js '/api/sns/web/v1/feed' '{"source_note_id":"..."}'
- *   -> {"x-s":"XYS_...","x-t":"1794..."}
- */
 'use strict';
 
 const fs = require('fs');
@@ -26,7 +8,6 @@ const { JSDOM } = require('jsdom');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
-// 自定义 base64 字母表（来自 bundle 模块 384）
 const CUSTOM_ALPHABET = 'ZmserbBoHQtNP+wOcza/LpngG8yJq42KWYj0DSfdikx3VT16IlUAFM97hECvuRX5';
 const STD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
@@ -42,19 +23,6 @@ function b64Custom(str) {
   }
   return out;
 }
-
-// 反向：解码（调试用）
-function b64CustomDecode(s) {
-  let std = '';
-  for (const ch of s) {
-    if (ch === '=') { std += '='; continue; }
-    const i = CUSTOM_ALPHABET.indexOf(ch);
-    std += i >= 0 ? STD_ALPHABET[i] : ch;
-  }
-  return Buffer.from(std, 'base64').toString('utf8');
-}
-
-let _win = null;
 
 function makeCanvasCtx() {
   const noop = () => {};
@@ -87,6 +55,8 @@ function makeCanvasCtx() {
   return o;
 }
 
+let _win = null;
+
 function init() {
   if (_win) return _win;
 
@@ -99,17 +69,15 @@ function init() {
   });
   const w = dom.window;
 
-  // navigator 关键项
   try {
     Object.defineProperty(w.navigator, 'webdriver', { get: () => false, configurable: true });
     Object.defineProperty(w.navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
     Object.defineProperty(w.navigator, 'deviceMemory', { get: () => 8, configurable: true });
     Object.defineProperty(w.navigator, 'languages', { get: () => ['zh-CN', 'zh'], configurable: true });
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* 部分 navigator 属性不可重定义 */ }
 
-  w.performance.now = () => Date.now() - 0;
+  w.performance.now = () => Date.now();
 
-  // 浏览器专有对象（依赖数组里明确列了 chrome / insight）
   w.chrome = {
     app: { isInstalled: false, InstallState: {}, RunningState: {} },
     runtime: {},
@@ -124,9 +92,9 @@ function init() {
     }),
   };
   if (typeof w.insight === 'undefined') w.insight = {};
-  // InstallTrigger 必须保持 undefined（Firefox 专有）
+  // InstallTrigger 必须留 undefined
 
-  // canvas：保留 jsdom 真实节点，只打补丁
+  // 保留真实 canvas 节点，只补 2D 上下文
   if (w.HTMLCanvasElement) {
     w.HTMLCanvasElement.prototype.getContext = function (kind) {
       if (kind === 'webgl' || kind === 'experimental-webgl' || kind === 'webgl2') return null;
@@ -137,7 +105,7 @@ function init() {
     };
   }
 
-  // DOM 操作宽容化：VM 会传非 Node 参数做探测
+  // 载荷会传非 Node 参数做环境探测，严格校验会挡住它
   for (const m of ['removeChild', 'appendChild', 'insertBefore', 'replaceChild']) {
     const proto = w.Node.prototype;
     const orig = proto[m];
@@ -158,12 +126,6 @@ function init() {
   return w;
 }
 
-/**
- * 生成签名头
- * @param {string} url   接口路径（含 query），如 /api/sns/web/v1/feed
- * @param {*} data       请求体（对象/字符串/空）
- * @returns {{ 'x-s': string, 'x-t': string }}
- */
 function sign(url, data) {
   const w = init();
 
@@ -179,14 +141,11 @@ function sign(url, data) {
   }
 
   const u = md5hex(c);
-  const p = md5hex(url);
-  const x3 = w.mnsv2(c, u, p);
-
   const S = {
     x0: '4.4.3',
     x1: 'xhs-pc-web',
     x2: 'Windows',
-    x3: x3,
+    x3: w.mnsv2(c, u, md5hex(url)),
     x4: x4,
     x5: u,
   };
@@ -194,26 +153,7 @@ function sign(url, data) {
   return {
     'x-s': 'XYS_' + b64Custom(JSON.stringify(S)),
     'x-t': String(Date.now()),
-    // 调试用
-    _debug: { x3, x5: u, x4, c_len: c.length },
   };
 }
 
-module.exports = { sign, b64Custom, b64CustomDecode, init };
-
-if (require.main === module) {
-  const url = process.argv[2];
-  const raw = process.argv[3];
-  if (!url) {
-    console.error('用法: node xhs_sign.js <url_path> [json_body]');
-    process.exit(1);
-  }
-  let data;
-  if (raw) {
-    try { data = JSON.parse(raw); } catch (e) { data = raw; }
-  }
-  const t0 = Date.now();
-  const r = sign(url, data);
-  const cost = Date.now() - t0;
-  console.log(JSON.stringify({ 'x-s': r['x-s'], 'x-t': r['x-t'], cost_ms: cost }, null, 1));
-}
+module.exports = { sign, b64Custom, init };

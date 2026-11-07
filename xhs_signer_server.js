@@ -1,42 +1,11 @@
-/**
- * 小红书签名常驻服务
- *
- * 启动时初始化一次（jsdom + 288KB 载荷 ≈ 300ms），之后每次签名约 1~3ms。
- *
- * 启动：
- *   node xhs_signer_server.js [port]        # 默认 18080
- *
- * 接口：
- *   GET  /health                  -> {ok, mnsv2}
- *   POST /sign  {url, data, a1}   -> {x-s, x-t, x-s-common, cost_ms}
- *   POST /sign_batch {items:[{url,data,a1}]} -> {results:[...]}
- */
 'use strict';
 
 const http = require('http');
-const crypto = require('crypto');
-const { sign, init } = require('./xhs_sign.js');
+const { sign, init, b64Custom } = require('./xhs_sign.js');
 
 const PORT = Number(process.argv[2] || process.env.XHS_SIGN_PORT || 18080);
 
-const CUSTOM_ALPHABET = 'ZmserbBoHQtNP+wOcza/LpngG8yJq42KWYj0DSfdikx3VT16IlUAFM97hECvuRX5';
-const STD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-function b64Custom(str) {
-  const std = Buffer.from(str, 'utf8').toString('base64');
-  let out = '';
-  for (const ch of std) {
-    if (ch === '=') { out += '='; continue; }
-    const i = STD_ALPHABET.indexOf(ch);
-    out += i >= 0 ? CUSTOM_ALPHABET[i] : ch;
-  }
-  return out;
-}
-
-/**
- * X-S-Common 设备指纹头
- * 结构取自 vendor-dynamic.js 的 xsCommon()，x9 在 x6/x7 为空、x8 为 null 时是固定值。
- */
+// x9 只在 x6/x7 为空、x8 为 null 时是固定值
 function xsCommon(a1, dsl) {
   const obj = {
     s0: 5, s1: '',

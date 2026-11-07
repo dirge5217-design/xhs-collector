@@ -1,10 +1,8 @@
 * text=auto
-
-*.py  text eol=lf
-*.js  text eol=lf
-*.md  text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.md text eol=lf
 *.json text eol=lf
-*.bat text eol=crlf
 
-# 站点运行时下发的签名载荷，禁止任何换行转换（字节级保持原样）
+# 载荷必须保持字节原样，不做换行转换
 _eval_captured.js -text

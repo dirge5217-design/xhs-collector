@@ -1,35 +1,3 @@
-"""
-小红书采集器（零浏览器）
-
-依赖常驻签名服务：
-    node xhs_signer_server.js 18080
-
-用法：
-    # 1) 推荐流（首页）
-    python xhs_collect.py --mode homefeed --pages 5
-
-    # 2) 关键词搜索
-    python xhs_collect.py --mode search --keyword 咖啡 --pages 20
-
-    # 3) 指定用户主页
-    python xhs_collect.py --mode user --user-id 5f3e... --pages 10
-
-    # 4) 指定笔记（文件一行一个 noteId，可选第二列 xsec_token）
-    python xhs_collect.py --mode note --notes notes.txt
-
-    # 公共参数
-    --detail            对每条笔记抓详情（正文全文/图片/标签）
-    --comments N        抓每篇笔记的评论，最多 N 页
-    --sub-comments      连二级评论一起抓
-    --skip-done-comments  已抓过评论的笔记跳过接口请求
-    --db xhs.db         落库文件（自动去重 + 断点续跑）
-    --csv out.csv       额外导出 CSV（默认只含本次运行的数据）
-    --csv-all           导出整库
-    --rate 1.5          请求间隔秒数（保守，别低于 1）
-    --proxy URL         默认 http://127.0.0.1:7897
-"""
-from __future__ import annotations
-
 import argparse
 import csv
 import json
@@ -43,8 +11,6 @@ from typing import Any
 
 import requests
 
-# ---------------------------------------------------------------- 常量
-
 HOST = "https://edith.xiaohongshu.com"
 REF_HOME = "https://www.xiaohongshu.com/explore"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -53,26 +19,12 @@ SIGNER = os.environ.get("XHS_SIGNER", "http://127.0.0.1:18080")
 IMG_FMT = ["jpg", "webp", "avif"]
 COOKIE_FILES = ("_xhs_cookie.txt", "xhs_cookie.txt")
 
-# 业务码 -> 含义
-CODE_MSG = {
-    0: "成功",
-    -100: "签名错误",
-    300011: "账号存在异常，被风控标记",
-    300012: "登录已失效",
-    300013: "请求过于频繁",
-    300031: "笔记暂时无法浏览（token 无效或过期）",
-    461: "请求被拒绝（缺 xsec_token 或风控）",
-}
-
-# ---------------------------------------------------------------- 基础工具
-
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
 def load_cookie() -> str:
-    """优先读文件，其次读环境变量。"""
     for f in COOKIE_FILES:
         if os.path.exists(f):
             v = open(f, encoding="utf-8").read().strip()
@@ -85,7 +37,7 @@ def load_cookie() -> str:
 
 
 def cookie_a1(cookie: str) -> str:
-    m = None
+    m = ""
     for part in cookie.split(";"):
         k, _, val = part.strip().partition("=")
         if k == "a1":
@@ -97,7 +49,6 @@ def cookie_a1(cookie: str) -> str:
 
 
 def num(v: Any) -> int:
-    """互动数可能是 '1.2万' / '10+' / 数字，统一成整数。"""
     if v is None:
         return 0
     if isinstance(v, (int, float)):
@@ -121,15 +72,11 @@ def num(v: Any) -> int:
         return 0
 
 
-# ---------------------------------------------------------------- 签名客户端
-
-
 class Signer:
     def __init__(self, base: str = SIGNER):
         self.base = base.rstrip("/")
         self.s = requests.Session()
-        self.s.trust_env = False          # 绝不能让本地请求走代理
-        self.calls = 0
+        self.s.trust_env = False  # 本地服务不能走系统代理
 
     def health(self) -> dict:
         return self.s.get(f"{self.base}/health", timeout=5).json()
@@ -141,11 +88,7 @@ class Signer:
         j = r.json()
         if "x-s" not in j:
             raise RuntimeError(f"签名服务返回异常: {j}")
-        self.calls += 1
         return j
-
-
-# ---------------------------------------------------------------- 存储
 
 
 class Store:
@@ -178,10 +121,6 @@ class Store:
         CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id);
         """)
         self.db.commit()
-
-    def known(self, nid: str) -> bool:
-        cur = self.db.execute("SELECT detail_done FROM notes WHERE id=?", (nid,))
-        return cur.fetchone() is not None
 
     def need_detail(self, nid: str) -> bool:
         cur = self.db.execute("SELECT detail_done FROM notes WHERE id=?", (nid,))
@@ -233,11 +172,6 @@ class Store:
 
     def export_csv(self, path: str, note_ids: list[str] | None = None,
                    keyword: str | None = None) -> None:
-        """导出 CSV。
-
-        默认只导出本次运行的笔记（note_ids）；没传时按 keyword 过滤；
-        两者都为 None 才导出整库。评论按同一范围过滤，避免串进别的话题。
-        """
         cols = ["id", "user_id", "nickname", "type", "title", "description",
                 "liked", "collected", "comment", "share", "images", "tags",
                 "ip_location", "publish_time", "url", "xsec_token",
@@ -245,7 +179,7 @@ class Store:
 
         scope, where, args = "整库", "", []
         if note_ids:
-            # 用临时表而不是 IN (?,?,...)，避开 SQLite 变量数上限
+            # 临时表避开 SQLite 变量数上限
             self.db.execute("DROP TABLE IF EXISTS _export_ids")
             self.db.execute("CREATE TEMP TABLE _export_ids (id TEXT PRIMARY KEY)")
             self.db.executemany("INSERT OR IGNORE INTO _export_ids VALUES (?)",
@@ -286,13 +220,9 @@ class Store:
                 w.writerows(crows)
             log(f"[export] {len(crows)} 条评论（同范围）-> {cpath}")
         else:
-            # 别留下上次的旧评论文件造成误解
             if os.path.exists(cpath):
                 os.remove(cpath)
             log("[export] 本次范围内无评论")
-
-
-# ---------------------------------------------------------------- 采集主体
 
 
 class Xhs:
@@ -311,10 +241,8 @@ class Xhs:
         self._last = 0.0
         self.req = 0
 
-    # -------- 底层请求
-
     def _throttle(self) -> None:
-        gap = self.rate * (0.8 + random.random() * 0.4)   # +-20% 抖动
+        gap = self.rate * (0.8 + random.random() * 0.4)
         wait = self._last + gap - time.time()
         if wait > 0:
             time.sleep(wait)
@@ -322,7 +250,6 @@ class Xhs:
 
     def call(self, method: str, path: str, body: Any = None,
              referer: str = REF_HOME) -> dict:
-        """返回服务端 JSON；失败重试，签名每次重算。"""
         last_err = None
         for attempt in range(1, self.retry + 1):
             self._throttle()
@@ -373,15 +300,16 @@ class Xhs:
             code = j.get("code")
             if code == 0:
                 return j
-            if code in (-100,):
+            if code == -100:
                 last_err = f"签名被拒({code})"
                 time.sleep(1)
                 continue
             if code in (300011, 300012):
+                msg = {300011: "账号存在异常，被风控标记", 300012: "登录已失效"}[code]
                 raise SystemExit(
-                    f"\n[中止] 服务端返回 {code}: {CODE_MSG.get(code, j.get('msg'))}\n"
+                    f"\n[中止] 服务端返回 {code}: {msg}\n"
                     f"       这不是代码问题，换账号或降低频率后再跑。已落库数据不受影响。")
-            if code in (300013, 300031) or code == 461:
+            if code in (300013, 300031, 461):
                 last_err = f"业务码 {code}: {j.get('msg')}"
                 time.sleep(3 * attempt)
                 continue
@@ -389,17 +317,15 @@ class Xhs:
             break
         raise RuntimeError(f"请求失败 {path} -> {last_err}")
 
-    # -------- 字段提取
-
     @staticmethod
     def _fmt_time(v: Any) -> str:
         if not v:
             return ""
         try:
             n = int(v)
-            if n > 10_000_000_000:      # 毫秒时间戳
+            if n > 10_000_000_000:
                 return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(n / 1000))
-            if n > 1_000_000_000:       # 秒时间戳
+            if n > 1_000_000_000:
                 return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(n))
         except (TypeError, ValueError, OSError):
             pass
@@ -409,7 +335,7 @@ class Xhs:
     def _card_to_note(cls, item: dict, source: str, keyword: str = "") -> dict:
         nid = item.get("id") or item.get("note_id") or ""
         nc = item.get("note_card") or item.get("note") or {}
-        # 用户主页 /user_posted 返回的是扁平结构，字段直接挂在 item 上
+        # user_posted 是扁平结构，字段直接挂在 item 上
         if not nc and (item.get("display_title") or item.get("cover")):
             nc = item
         ii = nc.get("interact_info") or {}
@@ -441,8 +367,6 @@ class Xhs:
             "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-    # -------- 列表：推荐流
-
     def homefeed(self, pages: int, store: Store) -> list[dict]:
         out, cursor, idx = [], "", 0
         for p in range(pages):
@@ -472,8 +396,6 @@ class Xhs:
                 break
         return out
 
-    # -------- 列表：搜索
-
     def search(self, keyword: str, pages: int, store: Store,
                sort: str = "general", note_type: int = 0) -> list[dict]:
         out = []
@@ -502,8 +424,6 @@ class Xhs:
                 break
         return out
 
-    # -------- 列表：用户主页
-
     def user_notes(self, user_id: str, pages: int, store: Store) -> list[dict]:
         out, cursor = [], ""
         ref = f"https://www.xiaohongshu.com/user/profile/{user_id}"
@@ -527,8 +447,6 @@ class Xhs:
                 break
         return out
 
-    # -------- 详情
-
     def detail(self, nid: str, token: str, store: Store) -> dict | None:
         body = {"source_note_id": nid, "xsec_token": token,
                 "image_formats": IMG_FMT, "extra": {"need_body_topic": 1}}
@@ -539,13 +457,12 @@ class Xhs:
         if not items:
             return None
         nc = items[0].get("note_card") or {}
-        # 保留列表阶段的来源与关键词，别把来源覆盖成 detail
+        # 详情覆盖时保留列表阶段的来源与关键词
         row = store.db.execute("SELECT source,keyword FROM notes WHERE id=?",
                                (nid,)).fetchone()
         src, kw = row if row else ("detail", "")
         n = self._card_to_note({"id": nid, "note_card": nc, "xsec_token": token},
                               src, kw)
-        # 详情里有更全的字段，覆盖列表的简略值
         n["description"] = nc.get("desc") or n["description"]
         imgs = nc.get("image_list") or []
         if imgs:
@@ -554,17 +471,8 @@ class Xhs:
         store.mark(nid, "detail_done")
         return n
 
-    # -------- 评论
-
     def comments(self, nid: str, token: str, store: Store, max_pages: int = 5,
                  with_sub: bool = False) -> dict:
-        """抓评论并返回本次统计（都是「本次」，不含库里已有的历史数据）：
-
-        added        真正写库的新增行数（INSERT OR IGNORE 去重后）
-        root         接口返回的一级评论条数（去重前）
-        sub          接口返回的楼中楼条数（去重前，仅 --sub-comments 时有值）
-        sub_pending  未展开楼中楼时，按 sub_comment_count 累加出的待抓回复数（估算）
-        """
         cursor, page, pages_ok = "", 0, 0
         stat = {"added": 0, "root": 0, "sub": 0, "sub_pending": 0}
         ref = (f"https://www.xiaohongshu.com/explore/{nid}"
@@ -590,7 +498,7 @@ class Xhs:
                         stat["sub"] += len(subs)
                         rows += subs
             else:
-                # 没开 --sub-comments 时也能算出「差额在哪」，供日志解释总评
+                # 未展开时累加回复数，供日志解释总评差额
                 stat["sub_pending"] += sum(num(c.get("sub_comment_count"))
                                            for c in cs)
             stat["added"] += store.add_comments(rows)
@@ -598,7 +506,7 @@ class Xhs:
             page += 1
             if not cs or not d.get("has_more"):
                 break
-        # 只有至少一页真正成功才标记完成；失败不能标，否则下次会被跳过
+        # 失败不能标完成，否则下次会被跳过
         if pages_ok:
             store.mark(nid, "comment_done")
         return stat
@@ -640,9 +548,6 @@ class Xhs:
         }
 
 
-# ---------------------------------------------------------------- 主流程
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="小红书零浏览器采集器")
     ap.add_argument("--mode", required=True,
@@ -668,7 +573,6 @@ def main() -> None:
                     help="已抓过详情的跳过")
     a = ap.parse_args()
 
-    # 前置检查
     try:
         h = Signer().health()
         log(f"[signer] ok pid={h.get('pid')} uptime={h.get('uptime_s')}s")
@@ -700,19 +604,11 @@ def main() -> None:
             if not line or line.startswith("#"):
                 continue
             parts = line.split()
-            nid = parts[0]
-            tok = parts[1] if len(parts) > 1 else ""
-            notes.append({"id": nid, "xsec_token": tok, "title": "",
-                          "description": "", "user_id": "", "nickname": "",
-                          "type": "", "liked": 0, "collected": 0, "comment": 0,
-                          "share": 0, "images": 0, "tags": "", "ip_location": "",
-                          "publish_time": "", "source": "manual", "keyword": "",
-                          "url": f"https://www.xiaohongshu.com/explore/{nid}",
-                          "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+            notes.append({"id": parts[0],
+                          "xsec_token": parts[1] if len(parts) > 1 else ""})
 
     log(f"[list] 拿到 {len(notes)} 条笔记")
 
-    # 详情 + 评论
     todo = notes[: a.limit] if a.limit else notes
     n_detail = n_comment = 0
     n_root = n_sub = n_pending = 0
@@ -720,7 +616,6 @@ def main() -> None:
         nid, tok = n["id"], n.get("xsec_token") or ""
         if not nid:
             continue
-        # 每篇固定打印一行，避免「有的有详情行、有的没有」的错觉
         detail_txt, comment_txt, title_txt = "详情 未启用", "评论 未启用", ""
 
         if a.detail or a.mode == "note":
@@ -731,16 +626,12 @@ def main() -> None:
                     r = x.detail(nid, tok, store)
                     if r:
                         n_detail += 1
-                        # 「总评」是笔记展示的评论总数（含楼中楼回复），
-                        # 「入库评论」是本次去重后真正写库的新行数，两者口径不同
                         detail_txt = f"详情 OK 赞{r['liked']} 总评{r['comment']}"
                         title_txt = (r["title"] or r["description"])[:30]
                     else:
                         detail_txt = "详情 空响应"
                 except RuntimeError as e:
                     detail_txt = f"详情 失败({str(e)[:60]})"
-                except SystemExit:
-                    raise
 
         if a.comments > 0:
             already = store.comment_count(nid)
@@ -756,7 +647,6 @@ def main() -> None:
                     n_sub += st["sub"]
                     n_pending += st["sub_pending"]
                     if got:
-                        # 自解释格式：新增多少 + 本次抓到什么 + 差额在哪
                         if a.sub_comments:
                             parts = f"一级{st['root']} · 楼中楼{st['sub']}"
                         elif st["sub_pending"]:

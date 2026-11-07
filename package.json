@@ -2,7 +2,7 @@
   "name": "xhs-zero-browser-signer",
   "version": "1.0.0",
   "private": true,
-  "description": "小红书 x-s / x-t / x-s-common 纯 Node 签名器（零浏览器）",
+  "description": "小红书请求签名服务",
   "main": "xhs_sign.js",
   "dependencies": {
     "jsdom": "^26.0.0"
